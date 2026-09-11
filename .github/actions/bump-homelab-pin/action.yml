@@ -1,0 +1,199 @@
+name: Bump homelab pin
+description: >-
+  Open (or update) a deploy-bump/<source-repo> PR on fredabood/homelab that moves one pin:
+  an image line in stacks/*-stack.yml (kind: image) or a host-releases.lock line
+  (kind: host-native). Authenticates as the fredabood-homelab-deploy GitHub App. Never
+  merges — the human merge is the deploy gate.
+
+inputs:
+  kind:
+    description: 'image | host-native'
+    required: true
+  image:
+    description: 'kind=image: ghcr.io/fredabood/<name>'
+    required: false
+    default: ''
+  tag:
+    description: 'kind=image: sha-<40 hex>'
+    required: false
+    default: ''
+  digest:
+    description: 'kind=image: sha256:<64 hex>'
+    required: false
+    default: ''
+  release-name:
+    description: 'kind=host-native: the lock entry name (e.g. omnigent)'
+    required: false
+    default: ''
+  app-id:
+    description: 'GitHub App ID of fredabood-homelab-deploy.'
+    required: true
+  private-key:
+    description: 'The App private key (store as the HOMELAB_BUMP_APP_KEY secret).'
+    required: true
+  homelab-repo:
+    description: 'Deploy repo to bump.'
+    required: false
+    default: 'fredabood/homelab'
+  source-token:
+    description: 'Token that can read the source repo, for the ancestry compare.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: 'opened | updated | unchanged | skipped | unconsumed'
+    value: ${{ steps.bump.outputs.result }}
+  pr-url:
+    description: 'URL of the bump PR, when one was opened or updated.'
+    value: ${{ steps.bump.outputs.pr-url }}
+
+runs:
+  using: composite
+  steps:
+    - id: inputs
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        IMAGE: ${{ inputs.image }}
+        TAG: ${{ inputs.tag }}
+        DIGEST: ${{ inputs.digest }}
+        RELEASE: ${{ inputs.release-name }}
+        SHA: ${{ github.sha }}
+        HOMELAB: ${{ inputs.homelab-repo }}
+      run: |
+        set -euo pipefail
+        fail() { echo "::error::deploy-actions/bump-homelab-pin: $*"; exit 1; }
+        [[ "$HOMELAB" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || fail "invalid homelab-repo '$HOMELAB'"
+        echo "homelab-owner=${HOMELAB%%/*}" >> "$GITHUB_OUTPUT"
+        echo "homelab-name=${HOMELAB#*/}" >> "$GITHUB_OUTPUT"
+        case "$KIND" in
+          image)
+            [[ "$IMAGE" =~ ^ghcr\.io/fredabood/[a-z0-9._-]+$ ]] || fail "image must be ghcr.io/fredabood/<name>, got '$IMAGE'"
+            [[ "$TAG" =~ ^sha-[0-9a-f]{40}$ ]] || fail "tag must be sha-<40 hex>, got '$TAG'"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "digest must be sha256:<64 hex>, got '$DIGEST'"
+            [ "${TAG#sha-}" = "$SHA" ] || fail "tag $TAG is not this run's commit $SHA; bump the commit that was built"
+            echo "subject=$IMAGE" >> "$GITHUB_OUTPUT"
+            echo "new-ref=$IMAGE:$TAG@$DIGEST" >> "$GITHUB_OUTPUT"
+            ;;
+          host-native)
+            [[ "$RELEASE" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || fail "release-name is required for host-native, got '$RELEASE'"
+            echo "subject=$RELEASE" >> "$GITHUB_OUTPUT"
+            echo "new-ref=$SHA" >> "$GITHUB_OUTPUT"
+            ;;
+          *) fail "kind must be image or host-native, got '$KIND'" ;;
+        esac
+
+    - id: token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        # Scoped to the deploy repo only, whatever else the App is ever installed on.
+        owner: ${{ steps.inputs.outputs.homelab-owner }}
+        repositories: ${{ steps.inputs.outputs.homelab-name }}
+
+    - uses: actions/checkout@v5
+      with:
+        repository: ${{ inputs.homelab-repo }}
+        ref: main
+        path: .homelab
+        token: ${{ steps.token.outputs.token }}
+        persist-credentials: true
+        fetch-depth: 1
+
+    - id: bump
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        SOURCE_TOKEN: ${{ inputs.source-token }}
+        APP_SLUG: ${{ steps.token.outputs.app-slug }}
+        KIND: ${{ inputs.kind }}
+        IMAGE: ${{ inputs.image }}
+        TAG: ${{ inputs.tag }}
+        DIGEST: ${{ inputs.digest }}
+        SUBJECT: ${{ steps.inputs.outputs.subject }}
+        NEW_REF: ${{ steps.inputs.outputs.new-ref }}
+        SOURCE_REPO: ${{ github.repository }}
+        SOURCE_SHA: ${{ github.sha }}
+        HOMELAB: ${{ inputs.homelab-repo }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        SCRIPTS: ${{ github.action_path }}/../../../scripts
+      run: |
+        set -euo pipefail
+        out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+        summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+        cd .homelab
+
+        # --- ancestry guard: never move a pin backwards --------------------------
+        old_sha="$(bash "$SCRIPTS/current-pin.sh" "$KIND" . "$SUBJECT")" || {
+          echo "::error::homelab pins $SUBJECT inconsistently; fix by hand before automating"; exit 1; }
+        status=""
+        if [ -n "$old_sha" ] && [ "$old_sha" != "$SOURCE_SHA" ]; then
+          status="$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/$SOURCE_REPO/compare/$old_sha...$SOURCE_SHA" --jq .status 2>/dev/null || true)"
+        fi
+        decision="$(bash "$SCRIPTS/ancestry-decision.sh" "$old_sha" "$SOURCE_SHA" "$status")"
+        if [ "${decision%%$'\t'*}" != bump ]; then
+          reason="${decision#*$'\t'}"
+          echo "skipping: $reason"
+          summary "### homelab pin not bumped"; summary "$reason"
+          out result skipped
+          exit 0
+        fi
+
+        # --- apply with homelab's OWN tooling ------------------------------------
+        refused=""
+        if [ "$KIND" = image ]; then
+          [ -x internal/scripts/bump-image-pin.sh ] || { echo "::error::homelab has no internal/scripts/bump-image-pin.sh"; exit 1; }
+          res="$(internal/scripts/bump-image-pin.sh "$IMAGE" "$TAG" "$DIGEST" .)"
+          echo "$res"
+          if grep -q '^unconsumed ' <<<"$res"; then
+            summary "### $IMAGE is not consumed by any homelab stack yet — nothing to bump"
+            out result unconsumed
+            exit 0
+          fi
+          actions="$(sed -n 's/^actions: *//p' <<<"$res")"
+          refused="$(grep '^refused ' <<<"$res" || true)"
+          old_ref=""
+          [ -n "$old_sha" ] && old_ref="$IMAGE:sha-$old_sha"
+        else
+          res="$(bash "$SCRIPTS/bump-lock.sh" internal/launchd/host-releases.lock "$SUBJECT" "$SOURCE_REPO" "$SOURCE_SHA")"
+          actions=""
+          old_ref="$old_sha"
+        fi
+
+        if git diff --quiet; then
+          summary "### homelab already pins \`$NEW_REF\`"
+          out result unchanged
+          exit 0
+        fi
+
+        # --- commit as the App's bot user, on a stable per-source branch ---------
+        bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+        git config user.name "${APP_SLUG}[bot]"
+        git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+        branch="deploy-bump/${SOURCE_REPO##*/}"
+        export KIND SUBJECT SOURCE_REPO SOURCE_SHA NEW_REF RUN_URL
+        export OLD_REF="$old_ref" ACTIONS="$actions" REFUSED="$refused"
+        title="$(bash "$SCRIPTS/pr-body.sh" title)"
+        bash "$SCRIPTS/pr-body.sh" body > "$RUNNER_TEMP/pr-body.md"
+
+        git checkout -q -b "$branch"
+        git commit -q -a -m "$title" -m "Source: https://github.com/${SOURCE_REPO}/commit/${SOURCE_SHA}"
+        # The branch is regenerated from main on every publish, so a stale bump is replaced,
+        # never merged. Lease against whatever the remote branch holds right now.
+        remote_sha="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+        git push -q --force-with-lease="refs/heads/$branch:${remote_sha}" origin "HEAD:refs/heads/$branch"
+
+        existing="$(gh pr list --repo "$HOMELAB" --head "$branch" --state open --json number --jq '.[0].number // empty')"
+        if [ -n "$existing" ]; then
+          gh pr edit "$existing" --repo "$HOMELAB" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md" >/dev/null
+          url="$(gh pr view "$existing" --repo "$HOMELAB" --json url --jq .url)"
+          out result updated
+        else
+          url="$(gh pr create --repo "$HOMELAB" --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
+          out result opened
+        fi
+        out pr-url "$url"
+        summary "### homelab bump PR: $url"
+        summary '```'; summary "$NEW_REF"; summary '```'

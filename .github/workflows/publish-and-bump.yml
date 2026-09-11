@@ -1,0 +1,91 @@
+name: Publish and bump
+
+# Reusable: build + push an arm64 image to GHCR, then open/update the homelab bump PR.
+#
+#   jobs:
+#     deploy:
+#       uses: fredabood/deploy-actions/.github/workflows/publish-and-bump.yml@v1
+#       permissions: { contents: read, packages: write }
+#       with:
+#         image-name: buzz-notifier
+#         context: notifier
+#       secrets:
+#         HOMELAB_BUMP_APP_KEY: ${{ secrets.HOMELAB_BUMP_APP_KEY }}
+#
+# Contract for the calling repo: homelab docs/development/code-repo-contract.md.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        type: string
+        required: true
+      context:
+        type: string
+        default: '.'
+      file:
+        type: string
+        default: ''
+      smoke-command:
+        type: string
+        default: ''
+      app-id:
+        type: string
+        default: '__HOMELAB_BUMP_APP_ID__'
+    secrets:
+      HOMELAB_BUMP_APP_KEY:
+        required: true
+    outputs:
+      pin:
+        value: ${{ jobs.publish.outputs.pin }}
+      bump-result:
+        value: ${{ jobs.bump.outputs.result }}
+      bump-pr:
+        value: ${{ jobs.bump.outputs.pr-url }}
+
+jobs:
+  publish:
+    # The mini is aarch64. A native arm runner, not QEMU.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+      tag: ${{ steps.publish.outputs.tag }}
+      digest: ${{ steps.publish.outputs.digest }}
+      pin: ${{ steps.publish.outputs.pin }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: publish
+        uses: fredabood/deploy-actions/.github/actions/publish-image@v1
+        with:
+          image-name: ${{ inputs.image-name }}
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
+          smoke-command: ${{ inputs.smoke-command }}
+
+  bump:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # One bump at a time per source repo; a newer publish supersedes a queued one.
+    concurrency:
+      group: deploy-bump-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      result: ${{ steps.bump.outputs.result }}
+      pr-url: ${{ steps.bump.outputs.pr-url }}
+    steps:
+      - id: bump
+        uses: fredabood/deploy-actions/.github/actions/bump-homelab-pin@v1
+        with:
+          kind: image
+          image: ${{ needs.publish.outputs.image }}
+          tag: ${{ needs.publish.outputs.tag }}
+          digest: ${{ needs.publish.outputs.digest }}
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.HOMELAB_BUMP_APP_KEY }}
