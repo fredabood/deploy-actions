@@ -31,7 +31,7 @@ on:
         default: ''
       app-id:
         type: string
-        default: '__HOMELAB_BUMP_APP_ID__'
+        default: '4905018'
     secrets:
       HOMELAB_BUMP_APP_KEY:
         required: true
