@@ -72,9 +72,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    # One bump at a time per source repo; a newer publish supersedes a queued one.
+    # One bump at a time per source repo and image (each image has its own homelab
+    # branch); a newer publish of the same image supersedes a queued one.
     concurrency:
-      group: deploy-bump-${{ github.repository }}
+      group: deploy-bump-${{ github.repository }}-${{ inputs.image-name }}
       cancel-in-progress: false
     outputs:
       result: ${{ steps.bump.outputs.result }}
