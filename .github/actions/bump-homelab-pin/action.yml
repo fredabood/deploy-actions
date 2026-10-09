@@ -1,6 +1,6 @@
 name: Bump homelab pin
 description: >-
-  Open (or update) a deploy-bump/<source-repo> PR on fredabood/homelab that moves one pin:
+  Open (or update) a deploy-bump/<source-repo>-<artifact> PR on fredabood/homelab that moves one pin:
   an image line in stacks/*-stack.yml (kind: image) or a host-releases.lock line
   (kind: host-native). Authenticates as the fredabood-homelab-deploy GitHub App. Never
   merges — the human merge is the deploy gate.
@@ -168,11 +168,11 @@ runs:
           exit 0
         fi
 
-        # --- commit as the App's bot user, on a stable per-source branch ---------
+        # --- commit as the App's bot user, on a stable per-artifact branch -------
         bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
         git config user.name "${APP_SLUG}[bot]"
         git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
-        branch="deploy-bump/${SOURCE_REPO##*/}"
+        branch="$(bash "$SCRIPTS/bump-branch.sh" "$SOURCE_REPO" "$SUBJECT")"
         export KIND SUBJECT SOURCE_REPO SOURCE_SHA NEW_REF RUN_URL
         export OLD_REF="$old_ref" ACTIONS="$actions" REFUSED="$refused"
         title="$(bash "$SCRIPTS/pr-body.sh" title)"

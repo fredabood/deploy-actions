@@ -71,4 +71,26 @@ grep -qF "refuses" <<<"$body" && ok "body warns about a refused stack" || no "bo
 KIND=host-native SUBJECT=omnigent NEW_REF=$B OLD_REF=$A body="$(KIND=host-native SUBJECT=omnigent bash "$DIR/pr-body.sh" body)"
 grep -qF "host-release.sh apply omnigent" <<<"$body" && ok "host-native body gives the apply command" || no "host-native body gives the apply command"
 
+echo "=== bump-branch ==="
+bb() { bash "$DIR/bump-branch.sh" "$@"; }
+eq "$(bb fredabood/homelab ghcr.io/fredabood/buzz-notifier)" deploy-bump/homelab-buzz-notifier "image: repo short + image name"
+eq "$(bb fredabood/incubator ghcr.io/fredabood/wikipedia)" deploy-bump/incubator-wikipedia "image from a multi-image repo"
+eq "$(bb fredabood/omnigent omnigent)" deploy-bump/omnigent-omnigent "host-native: repo short + release name"
+w="$(bb fredabood/incubator ghcr.io/fredabood/wikipedia)"; i="$(bb fredabood/incubator ghcr.io/fredabood/imagery)"
+[ "$w" != "$i" ] && ok "two images from one repo get different branches" || no "two images from one repo get different branches ($w)"
+eq "$(bb fredabood/incubator ghcr.io/fredabood/wikipedia)" "$w" "stable: the same artifact always maps to the same branch"
+eq "$(bb fredabood/My.Repo ghcr.io/fredabood/a..b.lock)" deploy-bump/my-repo-a-b-lock "dots and case are cleaned into a valid ref"
+eq "$(bb fredabood/.github ghcr.io/fredabood/x.)" deploy-bump/github-x "no leading or trailing separator"
+eq "$(bb fredabood/LAB ghcr.io/fredabood/1000)" deploy-bump/lab-1000 "an upper-case issue key cannot form in the branch"
+for args in "fredabood/homelab ghcr.io/fredabood/buzz-notifier" "fredabood/My.Repo ghcr.io/fredabood/a..b.lock" "fredabood/.github x." "fredabood/omnigent omnigent"; do
+  # shellcheck disable=SC2086
+  b="$(bb $args)"
+  if git check-ref-format "refs/heads/$b"; then ok "valid git ref: $b"; else no "valid git ref: $b"; fi
+  if grep -qE '#[0-9]|(^|[^A-Za-z0-9_])(LAB|HL)-[0-9]' <<<"$b"; then no "no issue reference in $b"; else ok "no issue reference in $b"; fi
+done
+bb fredabood/homelab >/dev/null 2>&1; eq "$?" 2 "one argument is a usage error"
+bb fredabood/homelab '' >/dev/null 2>&1; eq "$?" 2 "an empty subject is a usage error"
+bb fredabood/homelab 'ghcr.io/fredabood/' >/dev/null 2>&1; eq "$?" 2 "a subject with no name is a usage error"
+bb fredabood/... x >/dev/null 2>&1; eq "$?" 2 "a name that cleans to nothing is a usage error"
+
 echo; echo "PASS=$PASS FAIL=$FAIL"; [ "$FAIL" -eq 0 ]

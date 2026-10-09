@@ -52,7 +52,7 @@ case "${1:-}" in
       echo
       echo "**Rollback:** revert this PR$( [ "$KIND" = host-native ] && echo ", then apply again (the previous release is still on disk)")."
       echo
-      echo "This PR changes only pin lines; homelab CI enforces that (\`check-deploy-layer.sh --bump-diff\`). A newer publish from the same repo replaces it rather than opening another."
+      echo "This PR changes only pin lines; homelab CI enforces that (\`check-deploy-layer.sh --bump-diff\`). A newer publish of the same artifact replaces it rather than opening another."
       echo
       echo "<!-- deploy-bump {\"kind\":\"${KIND}\",\"subject\":\"${SUBJECT}\",\"source\":\"${SOURCE_REPO}@${SOURCE_SHA}\"} -->"
     } | sanitise
